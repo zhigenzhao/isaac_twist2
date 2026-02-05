@@ -1,0 +1,16 @@
+[project]
+name = "isaac-twist2"
+version = "0.1.0"
+description = "TWIST2 Sim2Sim for G1 in Isaac Sim"
+requires-python = ">=3.10"
+dependencies = ["redis", "onnxruntime-gpu", "numpy", "torch"]
+
+[project.scripts]
+isaac-twist2-sim = "scripts.run_sim2sim:main"
+
+[tool.setuptools.packages.find]
+include = ["isaac_twist2*"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

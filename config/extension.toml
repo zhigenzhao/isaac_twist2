@@ -1,0 +1,11 @@
+[package]
+title = "TWIST2 Sim2Sim for G1"
+version = "0.1.0"
+description = "Isaac Sim extension for running TWIST2 ONNX policy on G1 robot with Redis communication"
+category = "Simulation"
+
+[dependencies]
+"isaacsim.core.api" = {}
+
+[[python.module]]
+name = "isaac_twist2"
