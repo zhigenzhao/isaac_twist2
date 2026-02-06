@@ -2,12 +2,18 @@
 """Standalone Isaac Sim runner for TWIST2 G1 sim2sim.
 
 Usage:
-    isaacsim-python scripts/run_sim2sim.py [--policy PATH] [--usd PATH] [--device cuda|cpu]
+    isaacsim-python scripts/run_sim2sim.py [--robot g1_inspire|g1] [--usd PATH] [--device cuda|cpu]
 """
 
 import argparse
 import os
 import sys
+
+
+USD_PATHS = {
+    "g1_inspire": "assets/g1_inspire_hand_usd/g1_29dof_inspire_hand.usd",
+    "g1": "assets/g1_usd/g1.usd",
+}
 
 
 def main():
@@ -19,10 +25,17 @@ def main():
         help="Path to ONNX policy file",
     )
     parser.add_argument(
+        "--robot",
+        type=str,
+        default="g1_inspire",
+        choices=["g1_inspire", "g1"],
+        help="Robot variant to use",
+    )
+    parser.add_argument(
         "--usd",
         type=str,
-        default="assets/g1_usd/g1_29dof_inspire_hand.usd",
-        help="Path to G1 USD file",
+        default=None,
+        help="Path to G1 USD file (overrides --robot)",
     )
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--physics_dt", type=float, default=0.002, help="Physics timestep (500 Hz)")
@@ -32,7 +45,7 @@ def main():
 
     # Resolve paths relative to project root (where this script is run from)
     policy_path = os.path.abspath(args.policy)
-    usd_path = os.path.abspath(args.usd)
+    usd_path = os.path.abspath(args.usd or USD_PATHS[args.robot])
 
     if not os.path.exists(policy_path):
         print(f"Error: Policy file not found: {policy_path}")
