@@ -9,7 +9,6 @@ import argparse
 import os
 import sys
 
-
 USD_PATHS = {
     "g1_inspire": "assets/g1_inspire_hand_usd/g1_29dof_inspire_hand.usd",
     "g1": "assets/g1_usd/g1.usd",
@@ -27,7 +26,7 @@ def main():
     parser.add_argument(
         "--robot",
         type=str,
-        default="g1_inspire",
+        default="g1",
         choices=["g1_inspire", "g1"],
         help="Robot variant to use",
     )
