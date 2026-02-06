@@ -8,6 +8,7 @@ import redis
 from isaacsim.core.prims import SingleArticulation
 from isaacsim.core.utils.prims import define_prim, get_prim_at_path
 from isaacsim.core.utils.rotations import quat_to_rot_matrix
+from isaacsim.core.utils.types import ArticulationAction
 
 from .rot_utils import quatToEuler
 
@@ -98,7 +99,13 @@ class G1Twist2Controller:
         device: str = "cuda",
         position: np.ndarray | None = None,
         orientation: np.ndarray | None = None,
+        control_mode: str = "pd",
     ):
+        # -- Validate control mode ----------------------------------------
+        if control_mode not in ("torque", "pd"):
+            raise ValueError(f"control_mode must be 'torque' or 'pd', got '{control_mode}'")
+        self.control_mode = control_mode
+
         # -- Create prim and articulation --------------------------------
         prim = get_prim_at_path(prim_path)
         if not prim.IsValid():
@@ -152,10 +159,6 @@ class G1Twist2Controller:
         self.robot.initialize(physics_sim_view=physics_sim_view)
         self._num_dof = self.robot.num_dof
 
-        # Set effort / control mode
-        self.robot.get_articulation_controller().set_effort_modes("force")
-        self.robot.get_articulation_controller().switch_control_mode("effort")
-
         # -- Build joint mapping -----------------------------------------
         dof_names = list(self.robot.dof_names)
         print(f"[TWIST2] Articulation has {self._num_dof} DOFs: {dof_names}")
@@ -183,13 +186,37 @@ class G1Twist2Controller:
         self.full_default_pos = np.zeros(self._num_dof, dtype=np.float32)
         self.full_default_pos[self.body_dof_indices] = DEFAULT_DOF_POS
 
-        # -- Disable Isaac Sim internal PD (we compute torques ourselves) --
-        zero_gains = np.zeros(self._num_dof, dtype=np.float32)
-        self.robot._articulation_view.set_gains(zero_gains, zero_gains)
+        # -- Control-mode setup ------------------------------------------
+        if self.control_mode == "torque":
+            # Explicit torque control: we compute PD torques ourselves
+            self.robot.get_articulation_controller().set_effort_modes("force")
+            self.robot.get_articulation_controller().switch_control_mode("effort")
 
-        # Set high max efforts so our explicit torques aren't clamped
-        high_effort = np.full(self._num_dof, 1000.0, dtype=np.float32)
-        self.robot._articulation_view.set_max_efforts(high_effort)
+            zero_gains = np.zeros(self._num_dof, dtype=np.float32)
+            self.robot._articulation_view.set_gains(zero_gains, zero_gains)
+
+            high_effort = np.full(self._num_dof, 1000.0, dtype=np.float32)
+            self.robot._articulation_view.set_max_efforts(high_effort)
+        else:
+            # PhysX implicit PD: set gains and send position targets
+            self.robot.get_articulation_controller().switch_control_mode("position")
+
+            full_kp = np.zeros(self._num_dof, dtype=np.float32)
+            full_kd = np.zeros(self._num_dof, dtype=np.float32)
+            full_kp[self.body_dof_indices] = STIFFNESS
+            full_kd[self.body_dof_indices] = DAMPING
+            if len(self.hand_dof_indices) > 0:
+                full_kp[self.hand_dof_indices] = 100.0
+                full_kd[self.hand_dof_indices] = 2.0
+            self.robot._articulation_view.set_gains(full_kp, full_kd)
+
+            full_max = np.zeros(self._num_dof, dtype=np.float32)
+            full_max[self.body_dof_indices] = TORQUE_LIMITS
+            if len(self.hand_dof_indices) > 0:
+                full_max[self.hand_dof_indices] = 5.0
+            self.robot._articulation_view.set_max_efforts(full_max)
+
+        print(f"[TWIST2] Control mode: {self.control_mode}")
 
         # Publish initial state to Redis
         self.redis_pipeline.set(_REDIS_STATE_BODY, json.dumps(np.zeros(34).tolist()))
@@ -315,6 +342,17 @@ class G1Twist2Controller:
         self.robot.set_joint_efforts(full_torque)
 
     # ------------------------------------------------------------------
+    # PhysX implicit PD targets (100 Hz — every policy step)
+    # ------------------------------------------------------------------
+    def apply_pd_targets(self):
+        """Send position targets to PhysX implicit PD solver."""
+        full_target = self.full_default_pos.copy()
+        full_target[self.body_dof_indices] = self.pd_target
+        self.robot.get_articulation_controller().apply_action(
+            ArticulationAction(joint_positions=full_target)
+        )
+
+    # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
     def post_reset(self):
@@ -331,6 +369,9 @@ class G1Twist2Controller:
         self._last_policy_time = None
         self._policy_intervals.clear()
         self._policy_step_count = 0
+
+        if self.control_mode == "pd":
+            self.apply_pd_targets()
 
     # ------------------------------------------------------------------
     # Helpers

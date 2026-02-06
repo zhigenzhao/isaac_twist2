@@ -41,6 +41,11 @@ def main():
     parser.add_argument("--physics_dt", type=float, default=0.002, help="Physics timestep (500 Hz)")
     parser.add_argument("--policy_frequency", type=int, default=100, help="Policy frequency in Hz")
     parser.add_argument("--headless", action="store_true", help="Run without rendering")
+    parser.add_argument(
+        "--control-mode", type=str, default="pd",
+        choices=["torque", "pd"],
+        help="'torque' (explicit PD) or 'pd' (PhysX implicit PD)",
+    )
     args = parser.parse_args()
 
     # Resolve paths relative to project root (where this script is run from)
@@ -76,6 +81,7 @@ def main():
     print(f"[TWIST2] Physics dt: {physics_dt}s ({1/physics_dt:.0f} Hz)")
     print(f"[TWIST2] Policy frequency: {args.policy_frequency} Hz (decimation={decimation})")
     print(f"[TWIST2] Rendering dt: {rendering_dt}s ({1/rendering_dt:.0f} Hz)")
+    print(f"[TWIST2] Control mode: {args.control_mode}")
 
     world = World(
         stage_units_in_meters=1.0,
@@ -94,6 +100,7 @@ def main():
         policy_path=policy_path,
         device=args.device,
         position=np.array([0.0, 0.0, 0.793]),
+        control_mode=args.control_mode,
     )
 
     # reset() does synchronous init: initializes physics, starts timeline, steps once
@@ -110,7 +117,10 @@ def main():
     def on_physics_step(step_size):
         if step_counter[0] % decimation == 0:
             controller._run_policy()
-        controller.apply_torques()
+            if controller.control_mode == "pd":
+                controller.apply_pd_targets()
+        if controller.control_mode == "torque":
+            controller.apply_torques()
         step_counter[0] += 1
 
     world.add_physics_callback("sim_step", on_physics_step)
