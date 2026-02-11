@@ -10,7 +10,7 @@ import os
 import sys
 
 USD_PATHS = {
-    "g1_inspire": "assets/g1_inspire_hand_usd/g1_29dof_inspire_hand.usd",
+    "g1_inspire": "assets/g1_usd/g1_inspire.usd",
     "g1": "assets/g1_usd/g1.usd",
 }
 
