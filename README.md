@@ -4,7 +4,7 @@ TWIST2 Sim2Sim controller for the [Unitree G1](https://www.unitree.com/g1/) huma
 
 > **Note:** This project is designed to run alongside the [TWIST2](https://github.com/amazon-far/TWIST2) repo, which provides the motion server that communicates with this controller via Redis.
 
-> **Note:** Currently only the standard G1 robot (`--robot g1`) with PD control mode (`--control-mode pd`) is supported. The G1 Inspire hand variant and explicit torque mode are not yet functional.
+> **Note:** Currently only PD control mode (`--control-mode pd`) is supported.
 
 ## Prerequisites
 
@@ -89,7 +89,7 @@ All values are JSON-encoded float arrays.
 | Variant | USD Path |
 |---|---|
 | `g1` | `assets/g1_usd/g1.usd` |
-| `g1_inspire` | `assets/g1_inspire_hand_usd/g1_29dof_inspire_hand.usd` |
+| `g1_inspire` | `assets/g1_usd/g1_inspire.usd` |
 
 ## Project Structure
 
@@ -103,7 +103,6 @@ isaac_twist2/
 ├── assets/
 │   ├── ckpts/                    # ONNX policy checkpoints
 │   ├── g1_usd/                   # G1 robot model
-│   └── g1_inspire_hand_usd/      # G1 + Inspire hand model
 └── config/
     └── extension.toml            # Isaac Sim extension metadata
 ```
