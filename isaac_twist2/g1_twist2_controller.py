@@ -71,6 +71,32 @@ TORQUE_LIMITS = np.array([
     40, 40, 40, 40, 4.0, 4.0, 4.0,
 ], dtype=np.float32)
 
+# Inspire hand: 6 primary joints per hand (controllable via drive)
+INSPIRE_HAND_JOINT_NAMES_LEFT = [
+    "L_thumb_proximal_yaw_joint", "L_thumb_proximal_pitch_joint",
+    "L_index_proximal_joint", "L_middle_proximal_joint",
+    "L_ring_proximal_joint", "L_pinky_proximal_joint",
+]
+INSPIRE_HAND_JOINT_NAMES_RIGHT = [
+    "R_thumb_proximal_yaw_joint", "R_thumb_proximal_pitch_joint",
+    "R_index_proximal_joint", "R_middle_proximal_joint",
+    "R_ring_proximal_joint", "R_pinky_proximal_joint",
+]
+
+# Standard G1 Dex3 hand: 7 joints per hand
+# Left: thumb(0,1,2), middle(0,1), index(0,1)
+DEX3_HAND_JOINT_NAMES_LEFT = [
+    "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
+    "left_hand_middle_0_joint", "left_hand_middle_1_joint",
+    "left_hand_index_0_joint", "left_hand_index_1_joint",
+]
+# Right: thumb(0,1,2), index(0,1), middle(0,1)
+DEX3_HAND_JOINT_NAMES_RIGHT = [
+    "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
+    "right_hand_index_0_joint", "right_hand_index_1_joint",
+    "right_hand_middle_0_joint", "right_hand_middle_1_joint",
+]
+
 # Redis keys (matching MuJoCo sim2sim)
 _REDIS_STATE_BODY = "state_body_unitree_g1_with_hands"
 _REDIS_STATE_HAND_L = "state_hand_left_unitree_g1_with_hands"
@@ -152,6 +178,17 @@ class G1Twist2Controller:
         self.hand_dof_indices: np.ndarray | None = None
         self._num_dof: int = 0
 
+        # Hand control state (filled during initialize)
+        self.hand_left_indices: np.ndarray | None = None
+        self.hand_right_indices: np.ndarray | None = None
+        self.hand_mimic_indices: np.ndarray | None = None
+        self.hand_target_left: np.ndarray | None = None
+        self.hand_target_right: np.ndarray | None = None
+        self.num_hand_dofs_per_side: int = 0
+        self.hand_kp: np.ndarray | None = None
+        self.hand_kd: np.ndarray | None = None
+        self.hand_max_effort: np.ndarray | None = None
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -182,15 +219,59 @@ class G1Twist2Controller:
         print(f"[TWIST2] Body DOF indices ({len(self.body_dof_indices)}): {self.body_dof_indices}")
         print(f"[TWIST2] Hand DOF indices ({len(self.hand_dof_indices)}): {self.hand_dof_indices}")
 
+        # -- Detect hand variant and build hand indices ------------------
+        hand_dof_names = [dof_names[i] for i in self.hand_dof_indices]
+        is_inspire = any(n.startswith("L_") or n.startswith("R_") for n in hand_dof_names)
+
+        if is_inspire:
+            left_names = INSPIRE_HAND_JOINT_NAMES_LEFT
+            right_names = INSPIRE_HAND_JOINT_NAMES_RIGHT
+        else:
+            left_names = DEX3_HAND_JOINT_NAMES_LEFT
+            right_names = DEX3_HAND_JOINT_NAMES_RIGHT
+
+        self.hand_left_indices = np.array(
+            [self._find_joint_index(n, dof_names) for n in left_names], dtype=np.int64
+        )
+        self.hand_right_indices = np.array(
+            [self._find_joint_index(n, dof_names) for n in right_names], dtype=np.int64
+        )
+        self.num_hand_dofs_per_side = len(left_names)
+
+        # Mimic indices: hand DOFs that are not primary controllable
+        primary_set = set(self.hand_left_indices) | set(self.hand_right_indices)
+        self.hand_mimic_indices = np.array(
+            sorted(set(self.hand_dof_indices) - primary_set), dtype=np.int64
+        )
+
+        self.hand_target_left = np.zeros(self.num_hand_dofs_per_side, dtype=np.float32)
+        self.hand_target_right = np.zeros(self.num_hand_dofs_per_side, dtype=np.float32)
+
+        hand_variant = "Inspire" if is_inspire else "Dex3"
+        print(f"[TWIST2] Hand variant: {hand_variant}")
+        print(f"[TWIST2]   Left primary ({len(self.hand_left_indices)}): {self.hand_left_indices}")
+        print(f"[TWIST2]   Right primary ({len(self.hand_right_indices)}): {self.hand_right_indices}")
+        print(f"[TWIST2]   Mimic ({len(self.hand_mimic_indices)}): {self.hand_mimic_indices}")
+
         # -- Build full-articulation default arrays ----------------------
         self.full_default_pos = np.zeros(self._num_dof, dtype=np.float32)
         self.full_default_pos[self.body_dof_indices] = DEFAULT_DOF_POS
+
+        # -- Read existing USD gains before overriding -------------------
+        existing_kp, existing_kd = self.robot._articulation_view.get_gains()
+        existing_max = self.robot._articulation_view.get_max_efforts()
+        hand_ctrl_indices = np.concatenate([self.hand_left_indices, self.hand_right_indices])
 
         # -- Control-mode setup ------------------------------------------
         if self.control_mode == "torque":
             # Explicit torque control: we compute PD torques ourselves
             self.robot.get_articulation_controller().set_effort_modes("force")
             self.robot.get_articulation_controller().switch_control_mode("effort")
+
+            # Store hand PD gains from USD for manual torque computation
+            self.hand_kp = existing_kp[0][hand_ctrl_indices].copy()
+            self.hand_kd = existing_kd[0][hand_ctrl_indices].copy()
+            self.hand_max_effort = existing_max[0][hand_ctrl_indices].copy()
 
             zero_gains = np.zeros(self._num_dof, dtype=np.float32)
             self.robot._articulation_view.set_gains(zero_gains, zero_gains)
@@ -205,23 +286,27 @@ class G1Twist2Controller:
             full_kd = np.zeros(self._num_dof, dtype=np.float32)
             full_kp[self.body_dof_indices] = STIFFNESS
             full_kd[self.body_dof_indices] = DAMPING
-            if len(self.hand_dof_indices) > 0:
-                full_kp[self.hand_dof_indices] = 100.0
-                full_kd[self.hand_dof_indices] = 2.0
+            # Hand controllable joints: use USD values
+            if len(hand_ctrl_indices) > 0:
+                full_kp[hand_ctrl_indices] = existing_kp[0][hand_ctrl_indices]
+                full_kd[hand_ctrl_indices] = existing_kd[0][hand_ctrl_indices]
+            # Mimic indices stay at zero — PhysX mimic constraint drives them
             self.robot._articulation_view.set_gains(full_kp, full_kd)
 
             full_max = np.zeros(self._num_dof, dtype=np.float32)
             full_max[self.body_dof_indices] = TORQUE_LIMITS
-            if len(self.hand_dof_indices) > 0:
-                full_max[self.hand_dof_indices] = 5.0
+            if len(hand_ctrl_indices) > 0:
+                full_max[hand_ctrl_indices] = existing_max[0][hand_ctrl_indices]
             self.robot._articulation_view.set_max_efforts(full_max)
 
         print(f"[TWIST2] Control mode: {self.control_mode}")
 
         # Publish initial state to Redis
         self.redis_pipeline.set(_REDIS_STATE_BODY, json.dumps(np.zeros(34).tolist()))
-        self.redis_pipeline.set(_REDIS_STATE_HAND_L, json.dumps(np.zeros(7).tolist()))
-        self.redis_pipeline.set(_REDIS_STATE_HAND_R, json.dumps(np.zeros(7).tolist()))
+        self.redis_pipeline.set(_REDIS_STATE_HAND_L,
+            json.dumps(np.zeros(self.num_hand_dofs_per_side).tolist()))
+        self.redis_pipeline.set(_REDIS_STATE_HAND_R,
+            json.dumps(np.zeros(self.num_hand_dofs_per_side).tolist()))
         self.redis_pipeline.set(_REDIS_STATE_NECK, json.dumps(np.zeros(2).tolist()))
         self.redis_pipeline.execute()
 
@@ -265,8 +350,10 @@ class G1Twist2Controller:
         ]).astype(np.float32)
 
         self.redis_pipeline.set(_REDIS_STATE_BODY, json.dumps(state_body.tolist()))
-        self.redis_pipeline.set(_REDIS_STATE_HAND_L, json.dumps(np.zeros(7).tolist()))
-        self.redis_pipeline.set(_REDIS_STATE_HAND_R, json.dumps(np.zeros(7).tolist()))
+        self.redis_pipeline.set(_REDIS_STATE_HAND_L,
+            json.dumps(joint_positions[self.hand_left_indices].tolist()))
+        self.redis_pipeline.set(_REDIS_STATE_HAND_R,
+            json.dumps(joint_positions[self.hand_right_indices].tolist()))
         self.redis_pipeline.set(_REDIS_STATE_NECK, json.dumps(np.zeros(2).tolist()))
         self.redis_pipeline.set(_REDIS_T_STATE, int(time.time() * 1000))
         self.redis_pipeline.execute()
@@ -277,7 +364,20 @@ class G1Twist2Controller:
         redis_results = self.redis_pipeline.execute()
 
         action_mimic = np.array(json.loads(redis_results[0]), dtype=np.float32) if redis_results[0] else np.zeros(N_MIMIC_OBS, dtype=np.float32)
-        # action_hand_left, action_hand_right, action_neck not used for policy obs but consumed
+
+        # Parse hand actions from Redis
+        action_hand_left_raw = redis_results[1]
+        action_hand_right_raw = redis_results[2]
+
+        if action_hand_left_raw:
+            parsed = np.array(json.loads(action_hand_left_raw), dtype=np.float32)
+            if len(parsed) == self.num_hand_dofs_per_side:
+                self.hand_target_left = parsed
+
+        if action_hand_right_raw:
+            parsed = np.array(json.loads(action_hand_right_raw), dtype=np.float32)
+            if len(parsed) == self.num_hand_dofs_per_side:
+                self.hand_target_right = parsed
 
         # -- Build full observation (1432) --------------------------------
         obs_full = np.concatenate([action_mimic, obs_proprio]).astype(np.float32)  # 127
@@ -331,13 +431,16 @@ class G1Twist2Controller:
         full_torque = np.zeros(self._num_dof, dtype=np.float32)
         full_torque[self.body_dof_indices] = torque_body
 
-        # Hand joints: hold at zero with simple PD
-        if len(self.hand_dof_indices) > 0:
-            hand_pos = joint_positions[self.hand_dof_indices]
-            hand_vel = joint_velocities[self.hand_dof_indices]
-            hand_torque = 100.0 * (0.0 - hand_pos) - 2.0 * hand_vel
-            hand_torque = np.clip(hand_torque, -5.0, 5.0)
-            full_torque[self.hand_dof_indices] = hand_torque
+        # Hand controllable joints: PD with targets from Redis
+        if len(self.hand_left_indices) > 0:
+            hand_ctrl = np.concatenate([self.hand_left_indices, self.hand_right_indices])
+            hand_target = np.concatenate([self.hand_target_left, self.hand_target_right])
+            hand_pos = joint_positions[hand_ctrl]
+            hand_vel = joint_velocities[hand_ctrl]
+            hand_torque = self.hand_kp * (hand_target - hand_pos) - self.hand_kd * hand_vel
+            hand_torque = np.clip(hand_torque, -self.hand_max_effort, self.hand_max_effort)
+            full_torque[hand_ctrl] = hand_torque
+        # Mimic joint torques stay at zero
 
         self.robot.set_joint_efforts(full_torque)
 
@@ -348,6 +451,9 @@ class G1Twist2Controller:
         """Send position targets to PhysX implicit PD solver."""
         full_target = self.full_default_pos.copy()
         full_target[self.body_dof_indices] = self.pd_target
+        full_target[self.hand_left_indices] = self.hand_target_left
+        full_target[self.hand_right_indices] = self.hand_target_right
+        # Mimic indices stay at default (zero) — PhysX mimic constraint drives them
         self.robot.get_articulation_controller().apply_action(
             ArticulationAction(joint_positions=full_target)
         )
@@ -369,6 +475,11 @@ class G1Twist2Controller:
         self._last_policy_time = None
         self._policy_intervals.clear()
         self._policy_step_count = 0
+
+        if self.hand_target_left is not None:
+            self.hand_target_left[:] = 0.0
+        if self.hand_target_right is not None:
+            self.hand_target_right[:] = 0.0
 
         if self.control_mode == "pd":
             self.apply_pd_targets()
